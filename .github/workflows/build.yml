@@ -12,6 +12,308 @@ jobs:
       - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.7
+      - name: Write app files
+        run: |
+          mkdir -p app/src/main/res/drawable
+          mkdir -p app/src/main/java/com/example/printer
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <application
+                  android:label="Thermal Printer"
+                  android:icon="@drawable/ic_printer"
+                  android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="image/*" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_printer.xml << 'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#1565C0" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M34,24h40v18h-40z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M24,44h60a6,6 0 0 1 6,6v22h-12v-10h-48v10h-12v-22a6,6 0 0 1 6,-6z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M34,60h40v26h-40z"/>
+              <path android:fillColor="#1565C0" android:pathData="M40,68h28v3h-28z"/>
+              <path android:fillColor="#1565C0" android:pathData="M40,75h28v3h-28z"/>
+          </vector>
+          EOF
+
+          cat > app/src/main/java/com/example/printer/MainActivity.java << 'EOF'
+          package com.example.printer;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.bluetooth.BluetoothAdapter;
+          import android.bluetooth.BluetoothDevice;
+          import android.bluetooth.BluetoothSocket;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.Paint;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.CheckBox;
+          import android.widget.EditText;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.Toast;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.util.ArrayList;
+          import java.util.UUID;
+
+          public class MainActivity extends Activity {
+
+              private static final UUID SPP_UUID =
+                      UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+              private static final int PRINT_WIDTH = 384; // 2-inch=384, 3-inch=576
+
+              private EditText input;
+              private CheckBox cutBox;
+              private ImageView preview;
+              private Bitmap sharedBitmap = null;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(40, 40, 40, 40);
+
+                  input = new EditText(this);
+                  input.setHint("Print செய்ய வேண்டிய text");
+                  input.setMinLines(5);
+                  input.setText("MY SHOP\n----------------\nItem 1      Rs.50\nItem 2      Rs.30\n----------------\nTotal       Rs.80\n\nThank you!");
+                  layout.addView(input);
+
+                  preview = new ImageView(this);
+                  preview.setAdjustViewBounds(true);
+                  preview.setMaxHeight(600);
+                  layout.addView(preview);
+
+                  cutBox = new CheckBox(this);
+                  cutBox.setText("Paper cut செய்");
+                  cutBox.setChecked(true);
+                  layout.addView(cutBox);
+
+                  Button btn = new Button(this);
+                  btn.setText("Printer தேர்ந்தெடுத்து Print செய்");
+                  btn.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          askPermissionAndPrint();
+                      }
+                  });
+                  layout.addView(btn);
+
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.addView(layout);
+                  setContentView(scroll);
+                  handleShare(getIntent());
+              }
+
+              @Override
+              protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  handleShare(intent);
+              }
+
+              private void handleShare(Intent intent) {
+                  if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
+                  String type = intent.getType();
+                  if (type != null && type.startsWith("image/")) {
+                      Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                      if (uri != null) {
+                          try {
+                              InputStream is = getContentResolver().openInputStream(uri);
+                              Bitmap bmp = BitmapFactory.decodeStream(is);
+                              is.close();
+                              sharedBitmap = bmp;
+                              preview.setImageBitmap(bmp);
+                              input.setVisibility(View.GONE);
+                          } catch (Exception e) {
+                              Toast.makeText(this, "Image திறக்க முடியலை: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                          }
+                      }
+                  } else {
+                      String shared = intent.getStringExtra(Intent.EXTRA_TEXT);
+                      if (shared != null) {
+                          sharedBitmap = null;
+                          preview.setImageBitmap(null);
+                          input.setVisibility(View.VISIBLE);
+                          input.setText(shared);
+                      }
+                  }
+              }
+
+              private void askPermissionAndPrint() {
+                  if (Build.VERSION.SDK_INT >= 31
+                          && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 1);
+                      return;
+                  }
+                  chooseAndPrint();
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+                  super.onRequestPermissionsResult(code, perms, results);
+                  if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+                      chooseAndPrint();
+                  } else {
+                      Toast.makeText(this, "Bluetooth permission தேவை", Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              private void chooseAndPrint() {
+                  BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+                  if (adapter == null || !adapter.isEnabled()) {
+                      Toast.makeText(this, "Bluetooth ON செய்யுங்க", Toast.LENGTH_LONG).show();
+                      return;
+                  }
+                  final ArrayList<BluetoothDevice> devices = new ArrayList<BluetoothDevice>(adapter.getBondedDevices());
+                  if (devices.isEmpty()) {
+                      Toast.makeText(this, "முதலில் printer-ஐ Bluetooth-ல் pair செய்யுங்க", Toast.LENGTH_LONG).show();
+                      return;
+                  }
+                  String[] names = new String[devices.size()];
+                  for (int i = 0; i < devices.size(); i++) {
+                      names[i] = devices.get(i).getName();
+                  }
+                  new AlertDialog.Builder(this)
+                          .setTitle("Printer தேர்ந்தெடுங்க")
+                          .setItems(names, new android.content.DialogInterface.OnClickListener() {
+                              @Override
+                              public void onClick(android.content.DialogInterface d, int which) {
+                                  printTo(devices.get(which));
+                              }
+                          })
+                          .show();
+              }
+
+              private byte[] bitmapToEscPos(Bitmap src) {
+                  int w = PRINT_WIDTH;
+                  int h = Math.max(1, src.getHeight() * w / src.getWidth());
+                  Bitmap scaled = Bitmap.createScaledBitmap(src, w, h, true);
+
+                  Bitmap white = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                  Canvas c = new Canvas(white);
+                  c.drawColor(Color.WHITE);
+                  c.drawBitmap(scaled, 0, 0, new Paint());
+
+                  int bytesPerRow = (w + 7) / 8;
+                  byte[] data = new byte[bytesPerRow * h];
+                  int[] px = new int[w];
+                  for (int y = 0; y < h; y++) {
+                      white.getPixels(px, 0, w, 0, y, w, 1);
+                      for (int x = 0; x < w; x++) {
+                          int p = px[x];
+                          int lum = (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100;
+                          if (lum < 140) {
+                              data[y * bytesPerRow + x / 8] |= (byte) (0x80 >> (x % 8));
+                          }
+                      }
+                  }
+
+                  ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                  try {
+                      bos.write(new byte[]{0x1D, 0x76, 0x30, 0x00,
+                              (byte) (bytesPerRow & 0xFF), (byte) ((bytesPerRow >> 8) & 0xFF),
+                              (byte) (h & 0xFF), (byte) ((h >> 8) & 0xFF)});
+                      bos.write(data);
+                  } catch (Exception ignored) {}
+                  return bos.toByteArray();
+              }
+
+              private void printTo(final BluetoothDevice device) {
+                  final String text = input.getText().toString();
+                  final boolean cut = cutBox.isChecked();
+                  final Bitmap bmp = sharedBitmap;
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          BluetoothSocket socket = null;
+                          try {
+                              socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
+                              socket.connect();
+                              OutputStream out = socket.getOutputStream();
+                              out.write(new byte[]{0x1B, 0x40});
+                              if (bmp != null) {
+                                  byte[] img = bitmapToEscPos(bmp);
+                                  int chunk = 1024;
+                                  for (int i = 0; i < img.length; i += chunk) {
+                                      out.write(img, i, Math.min(chunk, img.length - i));
+                                      out.flush();
+                                      Thread.sleep(20);
+                                  }
+                                  out.write("\n\n\n".getBytes("UTF-8"));
+                              } else {
+                                  out.write((text + "\n\n\n\n").getBytes("UTF-8"));
+                              }
+                              if (cut) {
+                                  out.write(new byte[]{0x1D, 0x56, 0x42, 0x00});
+                              }
+                              out.flush();
+                              Thread.sleep(2000);
+                              toast("Print அனுப்பப்பட்டது");
+                          } catch (Exception e) {
+                              toast("Error: " + e.getMessage());
+                          } finally {
+                              try { if (socket != null) socket.close(); } catch (Exception ignored) {}
+                          }
+                      }
+                  }).start();
+              }
+
+              private void toast(final String msg) {
+                  runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                      }
+                  });
+              }
+          }
+          EOF
       - run: gradle assembleDebug
       - uses: actions/upload-artifact@v4
         with:
