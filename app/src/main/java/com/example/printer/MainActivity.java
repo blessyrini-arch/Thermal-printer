@@ -6,11 +6,13 @@ import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Toast;
@@ -25,6 +27,7 @@ public class MainActivity extends Activity {
             UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
     private EditText input;
+    private CheckBox cutBox;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -40,6 +43,11 @@ public class MainActivity extends Activity {
         input.setText("MY SHOP\n----------------\nItem 1      Rs.50\nItem 2      Rs.30\n----------------\nTotal       Rs.80\n\nThank you!");
         layout.addView(input);
 
+        cutBox = new CheckBox(this);
+        cutBox.setText("Paper cut செய்");
+        cutBox.setChecked(true);
+        layout.addView(cutBox);
+
         Button btn = new Button(this);
         btn.setText("Printer தேர்ந்தெடுத்து Print செய்");
         btn.setOnClickListener(new View.OnClickListener() {
@@ -51,6 +59,22 @@ public class MainActivity extends Activity {
         layout.addView(btn);
 
         setContentView(layout);
+        handleShare(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        handleShare(intent);
+    }
+
+    private void handleShare(Intent intent) {
+        if (intent != null && Intent.ACTION_SEND.equals(intent.getAction())) {
+            String shared = intent.getStringExtra(Intent.EXTRA_TEXT);
+            if (shared != null) {
+                input.setText(shared);
+            }
+        }
     }
 
     private void askPermissionAndPrint() {
@@ -101,6 +125,7 @@ public class MainActivity extends Activity {
 
     private void printTo(final BluetoothDevice device) {
         final String text = input.getText().toString();
+        final boolean cut = cutBox.isChecked();
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -111,8 +136,11 @@ public class MainActivity extends Activity {
                     OutputStream out = socket.getOutputStream();
                     out.write(new byte[]{0x1B, 0x40});
                     out.write((text + "\n\n\n\n").getBytes("UTF-8"));
+                    if (cut) {
+                        out.write(new byte[]{0x1D, 0x56, 0x42, 0x00});
+                    }
                     out.flush();
-                    Thread.sleep(1000);
+                    Thread.sleep(1500);
                     toast("Print அனுப்பப்பட்டது");
                 } catch (Exception e) {
                     toast("Error: " + e.getMessage());
