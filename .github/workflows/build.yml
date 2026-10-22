@@ -92,7 +92,11 @@ jobs:
           import android.hardware.usb.UsbEndpoint;
           import android.hardware.usb.UsbInterface;
           import android.hardware.usb.UsbManager;
+          import android.graphics.Typeface;
           import android.net.Uri;
+          import android.text.Layout;
+          import android.text.StaticLayout;
+          import android.text.TextPaint;
           import android.os.Build;
           import android.os.Bundle;
           import android.view.Gravity;
@@ -273,6 +277,25 @@ jobs:
                   return s;
               }
 
+              Spinner spinner2(final String key) {
+                  final int[] sizes = {18, 20, 22, 24, 28, 32};
+                  String[] names = new String[sizes.length];
+                  for (int i = 0; i < sizes.length; i++) names[i] = String.valueOf(sizes[i]);
+                  Spinner s = new Spinner(this);
+                  s.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, names));
+                  int cur = sp.getInt(key, 22);
+                  for (int i = 0; i < sizes.length; i++) if (sizes[i] == cur) s.setSelection(i);
+                  s.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+                      public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                          sp.edit().putInt(key, sizes[pos]).apply();
+                      }
+
+                      public void onNothingSelected(AdapterView<?> p) {
+                      }
+                  });
+                  return s;
+              }
+
               Switch toggle(final String key, String text, boolean def) {
                   Switch s = new Switch(this);
                   s.setText(text);
@@ -361,6 +384,9 @@ jobs:
                   l.addView(spinner("page", PAGES));
                   l.addView(label("Paper Cut Spacing (blank lines)"));
                   l.addView(stepper());
+                  l.addView(toggle("imgtext", "Text-ஐ image ஆக print (தமிழுக்கு)", true));
+                  l.addView(label("Font size (image text)"));
+                  l.addView(spinner2("fsize"));
                   l.addView(toggle("cut", "Paper cut", true));
                   l.addView(toggle("auto", "Auto Connect Last Printer", true));
                   l.addView(toggle("drawer", "Open Cash Drawer after print", false));
@@ -460,10 +486,25 @@ jobs:
                   return o.toByteArray();
               }
 
+              Bitmap textToBitmap(String text) {
+                  int w = DOTS[sp.getInt("page", 1)];
+                  TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+                  tp.setColor(Color.BLACK);
+                  tp.setTypeface(Typeface.MONOSPACE);
+                  tp.setTextSize(sp.getInt("fsize", 22));
+                  StaticLayout lay = new StaticLayout(text, tp, w, Layout.Alignment.ALIGN_NORMAL, 1.0f, 0f, false);
+                  Bitmap bm = Bitmap.createBitmap(w, lay.getHeight() + 10, Bitmap.Config.ARGB_8888);
+                  Canvas cv = new Canvas(bm);
+                  cv.drawColor(Color.WHITE);
+                  lay.draw(cv);
+                  return bm;
+              }
+
               byte[] buildData(String text, Bitmap bmp) throws Exception {
                   ByteArrayOutputStream o = new ByteArrayOutputStream();
                   boolean esc = sp.getInt("ptype", 0) == 0;
                   if (esc) o.write(new byte[]{0x1B, 0x40});
+                  if (bmp == null && sp.getBoolean("imgtext", true)) bmp = textToBitmap(text);
                   if (bmp != null) o.write(bitmapBytes(bmp));
                   else o.write((text + "\n").getBytes("UTF-8"));
                   for (int i = 0; i < sp.getInt("spacing", 3); i++) o.write(0x0A);
