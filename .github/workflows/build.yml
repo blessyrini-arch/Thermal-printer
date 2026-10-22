@@ -16,16 +16,18 @@ jobs:
         run: |
           mkdir -p app/src/main/res/drawable
           mkdir -p app/src/main/java/com/example/printer
-
           cat > app/src/main/AndroidManifest.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.usb.host" android:required="false" />
               <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <uses-permission android:name="android.permission.INTERNET" />
               <application
                   android:label="Thermal Printer"
                   android:icon="@drawable/ic_printer"
+                  android:usesCleartextTraffic="true"
                   android:theme="@android:style/Theme.Material.Light.DarkActionBar">
                   <activity
                       android:name=".MainActivity"
@@ -49,7 +51,6 @@ jobs:
               </application>
           </manifest>
           EOF
-
           cat > app/src/main/res/drawable/ic_printer.xml << 'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp"
@@ -64,99 +65,321 @@ jobs:
               <path android:fillColor="#1565C0" android:pathData="M40,75h28v3h-28z"/>
           </vector>
           EOF
-
           cat > app/src/main/java/com/example/printer/MainActivity.java << 'EOF'
           package com.example.printer;
 
           import android.Manifest;
           import android.app.Activity;
           import android.app.AlertDialog;
+          import android.app.PendingIntent;
           import android.bluetooth.BluetoothAdapter;
           import android.bluetooth.BluetoothDevice;
           import android.bluetooth.BluetoothSocket;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
           import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
           import android.graphics.Bitmap;
           import android.graphics.BitmapFactory;
           import android.graphics.Canvas;
           import android.graphics.Color;
           import android.graphics.Paint;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbEndpoint;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
           import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
+          import android.view.Gravity;
           import android.view.View;
+          import android.widget.AdapterView;
+          import android.widget.ArrayAdapter;
           import android.widget.Button;
-          import android.widget.CheckBox;
           import android.widget.EditText;
           import android.widget.ImageView;
           import android.widget.LinearLayout;
+          import android.widget.RadioButton;
+          import android.widget.RadioGroup;
           import android.widget.ScrollView;
+          import android.widget.Spinner;
+          import android.widget.Switch;
+          import android.widget.TextView;
           import android.widget.Toast;
 
           import java.io.ByteArrayOutputStream;
           import java.io.InputStream;
           import java.io.OutputStream;
+          import java.net.InetSocketAddress;
+          import java.net.Socket;
           import java.util.ArrayList;
+          import java.util.Arrays;
           import java.util.UUID;
+          import java.util.function.Consumer;
 
           public class MainActivity extends Activity {
 
-              private static final UUID SPP_UUID =
-                      UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
-              private static final int PRINT_WIDTH = 384; // 2-inch=384, 3-inch=576
+              static final UUID SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+              static final String ACTION_USB = "com.example.printer.USB_PERMISSION";
+              static final String[] IFACES = {"Bluetooth", "USB", "WiFi"};
+              static final String[] PTYPES = {"ESC/POS", "Text only"};
+              static final String[] PAGES = {"2-inch (58mm)", "3-inch (80mm)", "4-inch (112mm)"};
+              static final int[] DOTS = {384, 576, 832};
+              static final String[] IMGCMDS = {"Auto", "GS v 0 (raster)", "ESC * (bit image)"};
 
-              private EditText input;
-              private CheckBox cutBox;
-              private ImageView preview;
-              private Bitmap sharedBitmap = null;
+              SharedPreferences sp;
+              EditText input, ipBox, portBox;
+              ImageView preview;
+              TextView status, btLabel;
+              Button clearBtn;
+              View homeView, settingsView;
+              int screen = 0;
+              Bitmap sharedBitmap;
+              Runnable pendingPerm;
 
               @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-
-                  LinearLayout layout = new LinearLayout(this);
-                  layout.setOrientation(LinearLayout.VERTICAL);
-                  layout.setPadding(40, 40, 40, 40);
-
-                  input = new EditText(this);
-                  input.setHint("Print செய்ய வேண்டிய text");
-                  input.setMinLines(5);
-                  input.setText("MY SHOP\n----------------\nItem 1      Rs.50\nItem 2      Rs.30\n----------------\nTotal       Rs.80\n\nThank you!");
-                  layout.addView(input);
-
-                  preview = new ImageView(this);
-                  preview.setAdjustViewBounds(true);
-                  preview.setMaxHeight(600);
-                  layout.addView(preview);
-
-                  cutBox = new CheckBox(this);
-                  cutBox.setText("Paper cut செய்");
-                  cutBox.setChecked(true);
-                  layout.addView(cutBox);
-
-                  Button btn = new Button(this);
-                  btn.setText("Printer தேர்ந்தெடுத்து Print செய்");
-                  btn.setOnClickListener(new View.OnClickListener() {
-                      @Override
-                      public void onClick(View v) {
-                          askPermissionAndPrint();
-                      }
-                  });
-                  layout.addView(btn);
-
-                  ScrollView scroll = new ScrollView(this);
-                  scroll.addView(layout);
-                  setContentView(scroll);
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  sp = getSharedPreferences("printer", MODE_PRIVATE);
+                  settingsView = buildSettings();
+                  homeView = buildHome();
+                  showHome();
                   handleShare(getIntent());
               }
 
+              int dp(int v) {
+                  return (int) (v * getResources().getDisplayMetrics().density);
+              }
+
+              void toast(final String m) {
+                  runOnUiThread(() -> Toast.makeText(MainActivity.this, m, Toast.LENGTH_LONG).show());
+              }
+
+              // ---------- Home screen ----------
+              View buildHome() {
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  l.setPadding(dp(16), dp(16), dp(16), dp(16));
+
+                  Button set = new Button(this);
+                  set.setText("⚙ Settings");
+                  set.setOnClickListener(x -> showSettings());
+                  l.addView(set);
+
+                  status = new TextView(this);
+                  l.addView(status);
+
+                  input = new EditText(this);
+                  input.setHint("Print செய்ய வேண்டிய text இங்கே type செய்யுங்க");
+                  input.setMinLines(8);
+                  input.setGravity(Gravity.TOP);
+                  l.addView(input);
+
+                  preview = new ImageView(this);
+                  preview.setAdjustViewBounds(true);
+                  preview.setMaxHeight(dp(300));
+                  l.addView(preview);
+
+                  clearBtn = new Button(this);
+                  clearBtn.setText("Image நீக்கு");
+                  clearBtn.setVisibility(View.GONE);
+                  clearBtn.setOnClickListener(x -> clearImage());
+                  l.addView(clearBtn);
+
+                  Button print = new Button(this);
+                  print.setText("🖨 PRINT");
+                  print.setOnClickListener(x -> doPrint());
+                  l.addView(print);
+
+                  ScrollView s = new ScrollView(this);
+                  s.addView(l);
+                  return s;
+              }
+
+              void clearImage() {
+                  sharedBitmap = null;
+                  preview.setImageBitmap(null);
+                  input.setVisibility(View.VISIBLE);
+                  clearBtn.setVisibility(View.GONE);
+              }
+
+              void showHome() {
+                  saveWifi();
+                  screen = 0;
+                  setContentView(homeView);
+                  refreshStatus();
+              }
+
+              void showSettings() {
+                  screen = 1;
+                  setContentView(settingsView);
+                  refreshStatus();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (screen == 1) showHome();
+                  else super.onBackPressed();
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  saveWifi();
+              }
+
+              void saveWifi() {
+                  if (ipBox != null && portBox != null) {
+                      sp.edit().putString("ip", ipBox.getText().toString().trim())
+                              .putString("port", portBox.getText().toString().trim()).apply();
+                  }
+              }
+
+              void refreshStatus() {
+                  int i = sp.getInt("iface", 0);
+                  if (btLabel != null) btLabel.setText("Selected: " + sp.getString("bt_name", "—"));
+                  if (status == null) return;
+                  String dest = i == 0 ? sp.getString("bt_name", "(printer தேர்வு இல்லை)")
+                          : i == 1 ? "USB" : sp.getString("ip", "IP இல்லை");
+                  status.setText("Interface: " + IFACES[i] + "  |  " + dest + "  |  " + PAGES[sp.getInt("page", 1)]);
+              }
+
+              // ---------- Settings screen ----------
+              TextView label(String t) {
+                  TextView v = new TextView(this);
+                  v.setText(t);
+                  v.setTextSize(15);
+                  v.setPadding(0, dp(14), 0, dp(4));
+                  return v;
+              }
+
+              Spinner spinner(final String key, String[] items) {
+                  Spinner s = new Spinner(this);
+                  s.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, items));
+                  s.setSelection(sp.getInt(key, key.equals("page") ? 1 : 0));
+                  s.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+                      public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                          sp.edit().putInt(key, pos).apply();
+                          refreshStatus();
+                      }
+
+                      public void onNothingSelected(AdapterView<?> p) {
+                      }
+                  });
+                  return s;
+              }
+
+              Switch toggle(final String key, String text, boolean def) {
+                  Switch s = new Switch(this);
+                  s.setText(text);
+                  s.setChecked(sp.getBoolean(key, def));
+                  s.setPadding(0, dp(8), 0, dp(8));
+                  s.setOnCheckedChangeListener((b, c) -> sp.edit().putBoolean(key, c).apply());
+                  return s;
+              }
+
+              View stepper() {
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setGravity(Gravity.CENTER_VERTICAL);
+                  final TextView val = new TextView(this);
+                  val.setText(String.valueOf(sp.getInt("spacing", 3)));
+                  val.setTextSize(18);
+                  val.setPadding(dp(20), 0, dp(20), 0);
+                  Button minus = new Button(this);
+                  minus.setText("-");
+                  minus.setOnClickListener(x -> {
+                      int n = Math.max(0, sp.getInt("spacing", 3) - 1);
+                      sp.edit().putInt("spacing", n).apply();
+                      val.setText(String.valueOf(n));
+                  });
+                  Button plus = new Button(this);
+                  plus.setText("+");
+                  plus.setOnClickListener(x -> {
+                      int n = Math.min(20, sp.getInt("spacing", 3) + 1);
+                      sp.edit().putInt("spacing", n).apply();
+                      val.setText(String.valueOf(n));
+                  });
+                  row.addView(minus);
+                  row.addView(val);
+                  row.addView(plus);
+                  return row;
+              }
+
+              View buildSettings() {
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  l.setPadding(dp(16), dp(16), dp(16), dp(16));
+
+                  Button back = new Button(this);
+                  back.setText("← Home");
+                  back.setOnClickListener(x -> showHome());
+                  l.addView(back);
+
+                  l.addView(label("Interface"));
+                  RadioGroup rg = new RadioGroup(this);
+                  rg.setOrientation(LinearLayout.HORIZONTAL);
+                  for (int i = 0; i < 3; i++) {
+                      RadioButton rb = new RadioButton(this);
+                      rb.setText(IFACES[i]);
+                      rb.setId(100 + i);
+                      rg.addView(rb);
+                  }
+                  rg.check(100 + sp.getInt("iface", 0));
+                  rg.setOnCheckedChangeListener((g, id) -> {
+                      sp.edit().putInt("iface", id - 100).apply();
+                      refreshStatus();
+                  });
+                  l.addView(rg);
+
+                  l.addView(label("Bluetooth printer"));
+                  btLabel = new TextView(this);
+                  l.addView(btLabel);
+                  Button pick = new Button(this);
+                  pick.setText("Bluetooth printer தேர்ந்தெடு");
+                  pick.setOnClickListener(x -> pickBluetooth(dv -> { }));
+                  l.addView(pick);
+
+                  l.addView(label("WiFi printer IP / Port"));
+                  ipBox = new EditText(this);
+                  ipBox.setHint("192.168.1.100");
+                  ipBox.setText(sp.getString("ip", ""));
+                  l.addView(ipBox);
+                  portBox = new EditText(this);
+                  portBox.setHint("9100");
+                  portBox.setText(sp.getString("port", "9100"));
+                  portBox.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+                  l.addView(portBox);
+
+                  l.addView(label("Printer Type"));
+                  l.addView(spinner("ptype", PTYPES));
+                  l.addView(label("Page Size"));
+                  l.addView(spinner("page", PAGES));
+                  l.addView(label("Paper Cut Spacing (blank lines)"));
+                  l.addView(stepper());
+                  l.addView(toggle("cut", "Paper cut", true));
+                  l.addView(toggle("auto", "Auto Connect Last Printer", true));
+                  l.addView(toggle("drawer", "Open Cash Drawer after print", false));
+                  l.addView(label("Image Print Command"));
+                  l.addView(spinner("imgcmd", IMGCMDS));
+
+                  ScrollView s = new ScrollView(this);
+                  s.addView(l);
+                  return s;
+              }
+
+              // ---------- Share (text / image) ----------
               @Override
               protected void onNewIntent(Intent intent) {
                   super.onNewIntent(intent);
                   handleShare(intent);
               }
 
-              private void handleShare(Intent intent) {
+              void handleShare(Intent intent) {
                   if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
                   String type = intent.getType();
                   if (type != null && type.startsWith("image/")) {
@@ -169,148 +392,302 @@ jobs:
                               sharedBitmap = bmp;
                               preview.setImageBitmap(bmp);
                               input.setVisibility(View.GONE);
+                              clearBtn.setVisibility(View.VISIBLE);
                           } catch (Exception e) {
-                              Toast.makeText(this, "Image திறக்க முடியலை: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                              toast("Image திறக்க முடியலை: " + e.getMessage());
                           }
                       }
                   } else {
                       String shared = intent.getStringExtra(Intent.EXTRA_TEXT);
                       if (shared != null) {
-                          sharedBitmap = null;
-                          preview.setImageBitmap(null);
-                          input.setVisibility(View.VISIBLE);
+                          clearImage();
                           input.setText(shared);
                       }
                   }
+                  showHome();
               }
 
-              private void askPermissionAndPrint() {
-                  if (Build.VERSION.SDK_INT >= 31
-                          && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                          != PackageManager.PERMISSION_GRANTED) {
-                      requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 1);
-                      return;
-                  }
-                  chooseAndPrint();
+              // ---------- Print data ----------
+              boolean dark(int[] px, int w, int h, int x, int y) {
+                  if (y >= h) return false;
+                  int p = px[y * w + x];
+                  return (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100 < 140;
               }
 
-              @Override
-              public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
-                  super.onRequestPermissionsResult(code, perms, results);
-                  if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
-                      chooseAndPrint();
-                  } else {
-                      Toast.makeText(this, "Bluetooth permission தேவை", Toast.LENGTH_LONG).show();
-                  }
-              }
-
-              private void chooseAndPrint() {
-                  BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-                  if (adapter == null || !adapter.isEnabled()) {
-                      Toast.makeText(this, "Bluetooth ON செய்யுங்க", Toast.LENGTH_LONG).show();
-                      return;
-                  }
-                  final ArrayList<BluetoothDevice> devices = new ArrayList<BluetoothDevice>(adapter.getBondedDevices());
-                  if (devices.isEmpty()) {
-                      Toast.makeText(this, "முதலில் printer-ஐ Bluetooth-ல் pair செய்யுங்க", Toast.LENGTH_LONG).show();
-                      return;
-                  }
-                  String[] names = new String[devices.size()];
-                  for (int i = 0; i < devices.size(); i++) {
-                      names[i] = devices.get(i).getName();
-                  }
-                  new AlertDialog.Builder(this)
-                          .setTitle("Printer தேர்ந்தெடுங்க")
-                          .setItems(names, new android.content.DialogInterface.OnClickListener() {
-                              @Override
-                              public void onClick(android.content.DialogInterface d, int which) {
-                                  printTo(devices.get(which));
-                              }
-                          })
-                          .show();
-              }
-
-              private byte[] bitmapToEscPos(Bitmap src) {
-                  int w = PRINT_WIDTH;
+              byte[] bitmapBytes(Bitmap src) throws Exception {
+                  int w = DOTS[sp.getInt("page", 1)];
                   int h = Math.max(1, src.getHeight() * w / src.getWidth());
                   Bitmap scaled = Bitmap.createScaledBitmap(src, w, h, true);
-
                   Bitmap white = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
                   Canvas c = new Canvas(white);
                   c.drawColor(Color.WHITE);
                   c.drawBitmap(scaled, 0, 0, new Paint());
+                  int[] px = new int[w * h];
+                  white.getPixels(px, 0, w, 0, 0, w, h);
 
-                  int bytesPerRow = (w + 7) / 8;
-                  byte[] data = new byte[bytesPerRow * h];
-                  int[] px = new int[w];
-                  for (int y = 0; y < h; y++) {
-                      white.getPixels(px, 0, w, 0, y, w, 1);
-                      for (int x = 0; x < w; x++) {
-                          int p = px[x];
-                          int lum = (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100;
-                          if (lum < 140) {
-                              data[y * bytesPerRow + x / 8] |= (byte) (0x80 >> (x % 8));
+                  ByteArrayOutputStream o = new ByteArrayOutputStream();
+                  if (sp.getInt("imgcmd", 0) == 2) {
+                      o.write(new byte[]{0x1B, 0x33, 24});
+                      for (int y0 = 0; y0 < h; y0 += 24) {
+                          o.write(new byte[]{0x1B, 0x2A, 33, (byte) (w & 0xFF), (byte) (w >> 8)});
+                          for (int x = 0; x < w; x++) {
+                              for (int k = 0; k < 3; k++) {
+                                  int bt = 0;
+                                  for (int bit = 0; bit < 8; bit++) {
+                                      if (dark(px, w, h, x, y0 + k * 8 + bit)) bt |= (0x80 >> bit);
+                                  }
+                                  o.write(bt);
+                              }
                           }
+                          o.write(0x0A);
+                      }
+                      o.write(new byte[]{0x1B, 0x32});
+                  } else {
+                      int bpr = (w + 7) / 8;
+                      for (int y0 = 0; y0 < h; y0 += 256) {
+                          int bh = Math.min(256, h - y0);
+                          byte[] data = new byte[bpr * bh];
+                          for (int y = 0; y < bh; y++) {
+                              for (int x = 0; x < w; x++) {
+                                  if (dark(px, w, h, x, y0 + y)) data[y * bpr + x / 8] |= (byte) (0x80 >> (x % 8));
+                              }
+                          }
+                          o.write(new byte[]{0x1D, 0x76, 0x30, 0x00, (byte) (bpr & 0xFF), (byte) (bpr >> 8),
+                                  (byte) (bh & 0xFF), (byte) (bh >> 8)});
+                          o.write(data);
                       }
                   }
-
-                  ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                  try {
-                      bos.write(new byte[]{0x1D, 0x76, 0x30, 0x00,
-                              (byte) (bytesPerRow & 0xFF), (byte) ((bytesPerRow >> 8) & 0xFF),
-                              (byte) (h & 0xFF), (byte) ((h >> 8) & 0xFF)});
-                      bos.write(data);
-                  } catch (Exception ignored) {}
-                  return bos.toByteArray();
+                  return o.toByteArray();
               }
 
-              private void printTo(final BluetoothDevice device) {
-                  final String text = input.getText().toString();
-                  final boolean cut = cutBox.isChecked();
-                  final Bitmap bmp = sharedBitmap;
-                  new Thread(new Runnable() {
-                      @Override
-                      public void run() {
-                          BluetoothSocket socket = null;
+              byte[] buildData(String text, Bitmap bmp) throws Exception {
+                  ByteArrayOutputStream o = new ByteArrayOutputStream();
+                  boolean esc = sp.getInt("ptype", 0) == 0;
+                  if (esc) o.write(new byte[]{0x1B, 0x40});
+                  if (bmp != null) o.write(bitmapBytes(bmp));
+                  else o.write((text + "\n").getBytes("UTF-8"));
+                  for (int i = 0; i < sp.getInt("spacing", 3); i++) o.write(0x0A);
+                  if (esc && sp.getBoolean("cut", true)) o.write(new byte[]{0x1D, 0x56, 0x42, 0x00});
+                  if (esc && sp.getBoolean("drawer", false)) o.write(new byte[]{0x1B, 0x70, 0x00, 0x19, (byte) 0xFA});
+                  return o.toByteArray();
+              }
+
+              void send(OutputStream out, byte[] d) throws Exception {
+                  for (int i = 0; i < d.length; i += 1024) {
+                      out.write(d, i, Math.min(1024, d.length - i));
+                      out.flush();
+                      Thread.sleep(15);
+                  }
+              }
+
+              void doPrint() {
+                  String text = input.getText().toString();
+                  Bitmap bmp = sharedBitmap;
+                  if (bmp == null && text.trim().isEmpty()) {
+                      toast("முதலில் text type செய்யுங்க");
+                      return;
+                  }
+                  int i = sp.getInt("iface", 0);
+                  if (i == 0) printBluetooth(text, bmp);
+                  else if (i == 1) printUsb(text, bmp);
+                  else printWifi(text, bmp);
+              }
+
+              // ---------- Bluetooth ----------
+              void withBtPermission(Runnable r) {
+                  if (Build.VERSION.SDK_INT >= 31
+                          && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                      pendingPerm = r;
+                      requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 1);
+                  } else {
+                      r.run();
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int c, String[] p, int[] r) {
+                  super.onRequestPermissionsResult(c, p, r);
+                  if (r.length > 0 && r[0] == PackageManager.PERMISSION_GRANTED && pendingPerm != null) {
+                      Runnable x = pendingPerm;
+                      pendingPerm = null;
+                      x.run();
+                  } else {
+                      toast("Bluetooth permission தேவை");
+                  }
+              }
+
+              void pickBluetooth(final Consumer<BluetoothDevice> cb) {
+                  withBtPermission(() -> {
+                      BluetoothAdapter ad = BluetoothAdapter.getDefaultAdapter();
+                      if (ad == null || !ad.isEnabled()) {
+                          toast("Bluetooth ON செய்யுங்க");
+                          return;
+                      }
+                      final ArrayList<BluetoothDevice> devs = new ArrayList<BluetoothDevice>(ad.getBondedDevices());
+                      if (devs.isEmpty()) {
+                          toast("முதலில் printer-ஐ Bluetooth-ல் pair செய்யுங்க");
+                          return;
+                      }
+                      String[] names = new String[devs.size()];
+                      for (int i = 0; i < names.length; i++) {
+                          names[i] = devs.get(i).getName() + "\n" + devs.get(i).getAddress();
+                      }
+                      new AlertDialog.Builder(this).setTitle("Printer தேர்ந்தெடுங்க").setItems(names, (dlg, which) -> {
+                          BluetoothDevice dv = devs.get(which);
+                          sp.edit().putString("bt_addr", dv.getAddress()).putString("bt_name", dv.getName()).apply();
+                          refreshStatus();
+                          cb.accept(dv);
+                      }).show();
+                  });
+              }
+
+              void printBluetooth(final String text, final Bitmap bmp) {
+                  withBtPermission(() -> {
+                      String addr = sp.getString("bt_addr", null);
+                      if (addr != null && sp.getBoolean("auto", true)) {
+                          BluetoothAdapter ad = BluetoothAdapter.getDefaultAdapter();
+                          if (ad == null || !ad.isEnabled()) {
+                              toast("Bluetooth ON செய்யுங்க");
+                              return;
+                          }
+                          btSend(ad.getRemoteDevice(addr), text, bmp);
+                      } else {
+                          pickBluetooth(dv -> btSend(dv, text, bmp));
+                      }
+                  });
+              }
+
+              void btSend(final BluetoothDevice dev, final String text, final Bitmap bmp) {
+                  new Thread(() -> {
+                      BluetoothSocket s = null;
+                      try {
+                          byte[] data = buildData(text, bmp);
+                          s = dev.createRfcommSocketToServiceRecord(SPP);
+                          s.connect();
+                          send(s.getOutputStream(), data);
+                          Thread.sleep(1500);
+                          toast("Print அனுப்பப்பட்டது");
+                      } catch (Exception e) {
+                          toast("Error: " + e.getMessage());
+                      } finally {
                           try {
-                              socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
-                              socket.connect();
-                              OutputStream out = socket.getOutputStream();
-                              out.write(new byte[]{0x1B, 0x40});
-                              if (bmp != null) {
-                                  byte[] img = bitmapToEscPos(bmp);
-                                  int chunk = 1024;
-                                  for (int i = 0; i < img.length; i += chunk) {
-                                      out.write(img, i, Math.min(chunk, img.length - i));
-                                      out.flush();
-                                      Thread.sleep(20);
-                                  }
-                                  out.write("\n\n\n".getBytes("UTF-8"));
-                              } else {
-                                  out.write((text + "\n\n\n\n").getBytes("UTF-8"));
-                              }
-                              if (cut) {
-                                  out.write(new byte[]{0x1D, 0x56, 0x42, 0x00});
-                              }
-                              out.flush();
-                              Thread.sleep(2000);
-                              toast("Print அனுப்பப்பட்டது");
-                          } catch (Exception e) {
-                              toast("Error: " + e.getMessage());
-                          } finally {
-                              try { if (socket != null) socket.close(); } catch (Exception ignored) {}
+                              if (s != null) s.close();
+                          } catch (Exception ignored) {
                           }
                       }
                   }).start();
               }
 
-              private void toast(final String msg) {
-                  runOnUiThread(new Runnable() {
-                      @Override
-                      public void run() {
-                          Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+              // ---------- WiFi ----------
+              void printWifi(final String text, final Bitmap bmp) {
+                  final String ip = sp.getString("ip", "").trim();
+                  if (ip.isEmpty()) {
+                      toast("Settings-ல் printer IP போடுங்க");
+                      return;
+                  }
+                  int pt = 9100;
+                  try {
+                      pt = Integer.parseInt(sp.getString("port", "9100").trim());
+                  } catch (Exception ignored) {
+                  }
+                  final int port = pt;
+                  new Thread(() -> {
+                      Socket s = null;
+                      try {
+                          byte[] data = buildData(text, bmp);
+                          s = new Socket();
+                          s.connect(new InetSocketAddress(ip, port), 5000);
+                          send(s.getOutputStream(), data);
+                          Thread.sleep(1000);
+                          toast("Print அனுப்பப்பட்டது");
+                      } catch (Exception e) {
+                          toast("WiFi Error: " + e.getMessage());
+                      } finally {
+                          try {
+                              if (s != null) s.close();
+                          } catch (Exception ignored) {
+                          }
                       }
-                  });
+                  }).start();
+              }
+
+              // ---------- USB ----------
+              void printUsb(final String text, final Bitmap bmp) {
+                  final UsbManager um = (UsbManager) getSystemService(Context.USB_SERVICE);
+                  UsbDevice found = null;
+                  for (UsbDevice d : um.getDeviceList().values()) {
+                      if (found == null) found = d;
+                      for (int i = 0; i < d.getInterfaceCount(); i++) {
+                          if (d.getInterface(i).getInterfaceClass() == UsbConstants.USB_CLASS_PRINTER) found = d;
+                      }
+                  }
+                  if (found == null) {
+                      toast("USB printer இல்லை. OTG cable இணைத்தீர்களா?");
+                      return;
+                  }
+                  final UsbDevice fd = found;
+                  if (um.hasPermission(fd)) {
+                      usbSend(um, fd, text, bmp);
+                      return;
+                  }
+                  BroadcastReceiver rcv = new BroadcastReceiver() {
+                      @Override
+                      public void onReceive(Context ctx, Intent it) {
+                          MainActivity.this.unregisterReceiver(this);
+                          if (it.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                              usbSend(um, fd, text, bmp);
+                          } else {
+                              toast("USB permission மறுக்கப்பட்டது");
+                          }
+                      }
+                  };
+                  IntentFilter f = new IntentFilter(ACTION_USB);
+                  if (Build.VERSION.SDK_INT >= 33) registerReceiver(rcv, f, Context.RECEIVER_NOT_EXPORTED);
+                  else registerReceiver(rcv, f);
+                  Intent in = new Intent(ACTION_USB);
+                  in.setPackage(getPackageName());
+                  int fl = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
+                  um.requestPermission(fd, PendingIntent.getBroadcast(this, 0, in, fl));
+              }
+
+              void usbSend(final UsbManager um, final UsbDevice dev, final String text, final Bitmap bmp) {
+                  new Thread(() -> {
+                      UsbDeviceConnection conn = null;
+                      try {
+                          UsbInterface intf = null;
+                          UsbEndpoint ep = null;
+                          for (int i = 0; i < dev.getInterfaceCount() && ep == null; i++) {
+                              UsbInterface it = dev.getInterface(i);
+                              for (int j = 0; j < it.getEndpointCount(); j++) {
+                                  UsbEndpoint e = it.getEndpoint(j);
+                                  if (e.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK
+                                          && e.getDirection() == UsbConstants.USB_DIR_OUT) {
+                                      intf = it;
+                                      ep = e;
+                                      break;
+                                  }
+                              }
+                          }
+                          if (ep == null) throw new Exception("Printer endpoint கிடைக்கலை");
+                          conn = um.openDevice(dev);
+                          if (conn == null) throw new Exception("USB திறக்க முடியலை");
+                          conn.claimInterface(intf, true);
+                          byte[] data = buildData(text, bmp);
+                          int off = 0;
+                          while (off < data.length) {
+                              int n = Math.min(4096, data.length - off);
+                              byte[] chunk = Arrays.copyOfRange(data, off, off + n);
+                              int r = conn.bulkTransfer(ep, chunk, n, 5000);
+                              if (r < 0) throw new Exception("USB write fail");
+                              off += n;
+                          }
+                          toast("Print அனுப்பப்பட்டது");
+                      } catch (Exception e) {
+                          toast("USB Error: " + e.getMessage());
+                      } finally {
+                          if (conn != null) conn.close();
+                      }
+                  }).start();
               }
           }
           EOF
