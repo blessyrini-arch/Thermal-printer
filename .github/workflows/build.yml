@@ -85,6 +85,7 @@ jobs:
           import android.graphics.BitmapFactory;
           import android.graphics.Canvas;
           import android.graphics.Color;
+          import android.graphics.Matrix;
           import android.graphics.Paint;
           import android.hardware.usb.UsbConstants;
           import android.hardware.usb.UsbDevice;
@@ -93,6 +94,7 @@ jobs:
           import android.hardware.usb.UsbInterface;
           import android.hardware.usb.UsbManager;
           import android.graphics.Typeface;
+          import android.media.ExifInterface;
           import android.net.Uri;
           import android.text.Layout;
           import android.text.StaticLayout;
@@ -141,7 +143,7 @@ jobs:
               EditText input, ipBox, portBox;
               ImageView preview;
               TextView status, btLabel;
-              Button clearBtn;
+              Button clearBtn, rotBtn;
               View homeView, settingsView;
               int screen = 0;
               Bitmap sharedBitmap;
@@ -197,6 +199,12 @@ jobs:
                   clearBtn.setOnClickListener(x -> clearImage());
                   l.addView(clearBtn);
 
+                  rotBtn = new Button(this);
+                  rotBtn.setText("↻ Rotate");
+                  rotBtn.setVisibility(View.GONE);
+                  rotBtn.setOnClickListener(x -> rotateImage(90));
+                  l.addView(rotBtn);
+
                   Button print = new Button(this);
                   print.setText("🖨 PRINT");
                   print.setOnClickListener(x -> doPrint());
@@ -212,6 +220,38 @@ jobs:
                   preview.setImageBitmap(null);
                   input.setVisibility(View.VISIBLE);
                   clearBtn.setVisibility(View.GONE);
+                  rotBtn.setVisibility(View.GONE);
+              }
+
+              void rotateImage(int deg) {
+                  if (sharedBitmap == null) return;
+                  Matrix m = new Matrix();
+                  m.postRotate(deg);
+                  sharedBitmap = Bitmap.createBitmap(sharedBitmap, 0, 0, sharedBitmap.getWidth(), sharedBitmap.getHeight(), m, true);
+                  preview.setImageBitmap(sharedBitmap);
+              }
+
+              Bitmap fixOrientation(Uri uri, Bitmap bmp) {
+                  try {
+                      InputStream is2 = getContentResolver().openInputStream(uri);
+                      ExifInterface ex = new ExifInterface(is2);
+                      int o = ex.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+                      is2.close();
+                      Matrix m = new Matrix();
+                      switch (o) {
+                          case ExifInterface.ORIENTATION_ROTATE_90: m.postRotate(90); break;
+                          case ExifInterface.ORIENTATION_ROTATE_180: m.postRotate(180); break;
+                          case ExifInterface.ORIENTATION_ROTATE_270: m.postRotate(270); break;
+                          case ExifInterface.ORIENTATION_FLIP_HORIZONTAL: m.postScale(-1, 1); break;
+                          case ExifInterface.ORIENTATION_FLIP_VERTICAL: m.postScale(1, -1); break;
+                          case ExifInterface.ORIENTATION_TRANSPOSE: m.postRotate(90); m.postScale(-1, 1); break;
+                          case ExifInterface.ORIENTATION_TRANSVERSE: m.postRotate(270); m.postScale(-1, 1); break;
+                          default: return bmp;
+                      }
+                      return Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), m, true);
+                  } catch (Exception e) {
+                      return bmp;
+                  }
               }
 
               void showHome() {
@@ -420,10 +460,12 @@ jobs:
                               InputStream is = getContentResolver().openInputStream(uri);
                               Bitmap bmp = BitmapFactory.decodeStream(is);
                               is.close();
+                              bmp = fixOrientation(uri, bmp);
                               sharedBitmap = bmp;
                               preview.setImageBitmap(bmp);
                               input.setVisibility(View.GONE);
                               clearBtn.setVisibility(View.VISIBLE);
+                              rotBtn.setVisibility(View.VISIBLE);
                           } catch (Exception e) {
                               toast("Image திறக்க முடியலை: " + e.getMessage());
                           }
