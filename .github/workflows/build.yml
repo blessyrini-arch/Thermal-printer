@@ -149,6 +149,8 @@ jobs:
               Bitmap sharedBitmap;
               Runnable pendingPerm;
               int thr = 140;
+              boolean[] blk;
+              static final float[] GAMMA = {0.5f, 0.65f, 0.8f, 1.0f, 1.25f};
 
               @Override
               protected void onCreate(Bundle b) {
@@ -429,6 +431,7 @@ jobs:
                   l.addView(spinner("page", PAGES));
                   l.addView(label("Paper Cut Spacing (blank lines)"));
                   l.addView(stepper());
+                  l.addView(toggle("photo", "Photo mode (படங்களுக்கு dithering)", true));
                   l.addView(toggle("imgtext", "Text-ஐ image ஆக print (தமிழுக்கு)", true));
                   l.addView(label("Font size (image text)"));
                   l.addView(spinner2("fsize"));
@@ -482,12 +485,55 @@ jobs:
 
               // ---------- Print data ----------
               boolean dark(int[] px, int w, int h, int x, int y) {
-                  if (y >= h) return false;
-                  int p = px[y * w + x];
-                  return (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100 < thr;
+                  return y < h && blk[y * w + x];
               }
 
-              byte[] bitmapBytes(Bitmap src) throws Exception {
+              void atkinson(int[] px, int w, int h) {
+                  float[] g = new float[w * h];
+                  int[] hist = new int[256];
+                  for (int i = 0; i < g.length; i++) {
+                      int p = px[i];
+                      int v = (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100;
+                      g[i] = v;
+                      hist[v]++;
+                  }
+                  int cut = g.length / 100, acc = 0, lo = 0, hi = 255;
+                  for (int i = 0; i < 256; i++) {
+                      acc += hist[i];
+                      if (acc > cut) { lo = i; break; }
+                  }
+                  acc = 0;
+                  for (int i = 255; i >= 0; i--) {
+                      acc += hist[i];
+                      if (acc > cut) { hi = i; break; }
+                  }
+                  if (hi - lo < 30) { lo = 0; hi = 255; }
+                  float gamma = GAMMA[sp.getInt("dens", 2)];
+                  for (int i = 0; i < g.length; i++) {
+                      float v = (g[i] - lo) / (hi - lo);
+                      v = Math.max(0f, Math.min(1f, v));
+                      g[i] = (float) Math.pow(v, gamma) * 255f;
+                  }
+                  for (int y = 0; y < h; y++) {
+                      for (int x = 0; x < w; x++) {
+                          int i = y * w + x;
+                          float old = g[i];
+                          float nw = old < 128 ? 0 : 255;
+                          blk[i] = nw == 0;
+                          float err = (old - nw) / 8f;
+                          if (x + 1 < w) g[i + 1] += err;
+                          if (x + 2 < w) g[i + 2] += err;
+                          if (y + 1 < h) {
+                              if (x > 0) g[i + w - 1] += err;
+                              g[i + w] += err;
+                              if (x + 1 < w) g[i + w + 1] += err;
+                          }
+                          if (y + 2 < h) g[i + 2 * w] += err;
+                      }
+                  }
+              }
+
+              byte[] bitmapBytes(Bitmap src, boolean photo) throws Exception {
                   thr = THR[sp.getInt("dens", 2)];
                   int w = DOTS[sp.getInt("page", 1)];
                   int h = Math.max(1, src.getHeight() * w / src.getWidth());
@@ -498,6 +544,15 @@ jobs:
                   c.drawBitmap(scaled, 0, 0, new Paint());
                   int[] px = new int[w * h];
                   white.getPixels(px, 0, w, 0, 0, w, h);
+                  blk = new boolean[w * h];
+                  if (photo) {
+                      atkinson(px, w, h);
+                  } else {
+                      for (int i = 0; i < px.length; i++) {
+                          int p = px[i];
+                          blk[i] = (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100 < thr;
+                      }
+                  }
 
                   ByteArrayOutputStream o = new ByteArrayOutputStream();
                   if (sp.getInt("imgcmd", 0) == 2) {
@@ -553,8 +608,9 @@ jobs:
                   ByteArrayOutputStream o = new ByteArrayOutputStream();
                   boolean esc = sp.getInt("ptype", 0) == 0;
                   if (esc) o.write(new byte[]{0x1B, 0x40});
+                  boolean photo = bmp != null && sp.getBoolean("photo", true);
                   if (bmp == null && sp.getBoolean("imgtext", true)) bmp = textToBitmap(text);
-                  if (bmp != null) o.write(bitmapBytes(bmp));
+                  if (bmp != null) o.write(bitmapBytes(bmp, photo));
                   else if (esc && sp.getInt("dens", 2) >= 3) {
                       o.write(new byte[]{0x1B, 0x45, 1});
                       o.write((text + "\n").getBytes("UTF-8"));
