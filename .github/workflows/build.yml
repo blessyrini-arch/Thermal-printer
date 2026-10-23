@@ -25,7 +25,7 @@ jobs:
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
               <uses-permission android:name="android.permission.INTERNET" />
               <application
-                  android:label="Thermal Printer"
+                  android:label="ABH printer"
                   android:icon="@drawable/ic_printer"
                   android:usesCleartextTraffic="true"
                   android:theme="@android:style/Theme.Material.Light.DarkActionBar">
@@ -133,6 +133,8 @@ jobs:
               static final String[] PTYPES = {"ESC/POS", "Text only"};
               static final String[] PAGES = {"2-inch (58mm)", "3-inch (80mm)", "4-inch (112mm)"};
               static final int[] DOTS = {384, 576, 832};
+              static final String[] DENS = {"1 - Very light", "2 - Light", "3 - Medium", "4 - Dark", "5 - Very dark"};
+              static final int[] THR = {100, 120, 140, 165, 190};
               static final String[] IMGCMDS = {"Auto", "GS v 0 (raster)", "ESC * (bit image)"};
 
               SharedPreferences sp;
@@ -144,6 +146,7 @@ jobs:
               int screen = 0;
               Bitmap sharedBitmap;
               Runnable pendingPerm;
+              int thr = 140;
 
               @Override
               protected void onCreate(Bundle b) {
@@ -264,7 +267,7 @@ jobs:
               Spinner spinner(final String key, String[] items) {
                   Spinner s = new Spinner(this);
                   s.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, items));
-                  s.setSelection(sp.getInt(key, key.equals("page") ? 1 : 0));
+                  s.setSelection(sp.getInt(key, key.equals("page") ? 1 : key.equals("dens") ? 2 : 0));
                   s.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
                       public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
                           sp.edit().putInt(key, pos).apply();
@@ -380,6 +383,8 @@ jobs:
 
                   l.addView(label("Printer Type"));
                   l.addView(spinner("ptype", PTYPES));
+                  l.addView(label("Print Darkness (எழுத்து dark / light)"));
+                  l.addView(spinner("dens", DENS));
                   l.addView(label("Page Size"));
                   l.addView(spinner("page", PAGES));
                   l.addView(label("Paper Cut Spacing (blank lines)"));
@@ -437,10 +442,11 @@ jobs:
               boolean dark(int[] px, int w, int h, int x, int y) {
                   if (y >= h) return false;
                   int p = px[y * w + x];
-                  return (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100 < 140;
+                  return (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100 < thr;
               }
 
               byte[] bitmapBytes(Bitmap src) throws Exception {
+                  thr = THR[sp.getInt("dens", 2)];
                   int w = DOTS[sp.getInt("page", 1)];
                   int h = Math.max(1, src.getHeight() * w / src.getWidth());
                   Bitmap scaled = Bitmap.createScaledBitmap(src, w, h, true);
@@ -491,6 +497,7 @@ jobs:
                   TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
                   tp.setColor(Color.BLACK);
                   tp.setTypeface(Typeface.MONOSPACE);
+                  tp.setFakeBoldText(sp.getInt("dens", 2) >= 3);
                   tp.setTextSize(sp.getInt("fsize", 22));
                   StaticLayout lay = new StaticLayout(text, tp, w, Layout.Alignment.ALIGN_NORMAL, 1.0f, 0f, false);
                   Bitmap bm = Bitmap.createBitmap(w, lay.getHeight() + 10, Bitmap.Config.ARGB_8888);
@@ -506,7 +513,10 @@ jobs:
                   if (esc) o.write(new byte[]{0x1B, 0x40});
                   if (bmp == null && sp.getBoolean("imgtext", true)) bmp = textToBitmap(text);
                   if (bmp != null) o.write(bitmapBytes(bmp));
-                  else o.write((text + "\n").getBytes("UTF-8"));
+                  else if (esc && sp.getInt("dens", 2) >= 3) {
+                      o.write(new byte[]{0x1B, 0x45, 1});
+                      o.write((text + "\n").getBytes("UTF-8"));
+                  } else o.write((text + "\n").getBytes("UTF-8"));
                   for (int i = 0; i < sp.getInt("spacing", 3); i++) o.write(0x0A);
                   if (esc && sp.getBoolean("cut", true)) o.write(new byte[]{0x1D, 0x56, 0x42, 0x00});
                   if (esc && sp.getBoolean("drawer", false)) o.write(new byte[]{0x1B, 0x70, 0x00, 0x19, (byte) 0xFA});
