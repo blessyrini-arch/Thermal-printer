@@ -323,7 +323,7 @@ jobs:
               }
 
               Spinner spinner2(final String key) {
-                  final int[] sizes = {18, 20, 22, 24, 28, 32};
+                  final int[] sizes = {18, 20, 22, 24, 28, 32, 40, 48, 60, 72, 80, 90, 100, 110, 120, 140, 160, 200, 250, 300};
                   String[] names = new String[sizes.length];
                   for (int i = 0; i < sizes.length; i++) names[i] = String.valueOf(sizes[i]);
                   Spinner s = new Spinner(this);
