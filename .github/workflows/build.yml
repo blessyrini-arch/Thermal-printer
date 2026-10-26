@@ -40,7 +40,7 @@ jobs:
                       <intent-filter>
                           <action android:name="android.intent.action.SEND" />
                           <category android:name="android.intent.category.DEFAULT" />
-                          <data android:mimeType="text/plain" />
+                          <data android:mimeType="text/*" />
                       </intent-filter>
                       <intent-filter>
                           <action android:name="android.intent.action.SEND" />
@@ -51,6 +51,11 @@ jobs:
                           <action android:name="android.intent.action.SEND" />
                           <category android:name="android.intent.category.DEFAULT" />
                           <data android:mimeType="application/pdf" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.PROCESS_TEXT" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
                       </intent-filter>
                   </activity>
               </application>
@@ -538,7 +543,18 @@ jobs:
               }
 
               void handleShare(Intent intent) {
-                  if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
+                  if (intent == null) return;
+                  String act = intent.getAction();
+                  if (Intent.ACTION_PROCESS_TEXT.equals(act)) {
+                      CharSequence pt = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT);
+                      if (pt != null) {
+                          clearImage();
+                          input.setText(pt.toString());
+                      }
+                      showHome();
+                      return;
+                  }
+                  if (!Intent.ACTION_SEND.equals(act)) return;
                   String type = intent.getType();
                   if ("application/pdf".equals(type)) {
                       startPdf(intent);
@@ -561,7 +577,25 @@ jobs:
                           }
                       }
                   } else {
-                      String shared = intent.getStringExtra(Intent.EXTRA_TEXT);
+                      String shared = null;
+                      CharSequence cs = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+                      if (cs != null) shared = cs.toString();
+                      if (shared == null) {
+                          Uri tu = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                          if (tu != null) {
+                              try {
+                                  InputStream ins = getContentResolver().openInputStream(tu);
+                                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                                  byte[] buf = new byte[4096];
+                                  int rd;
+                                  while ((rd = ins.read(buf)) > 0) bo.write(buf, 0, rd);
+                                  ins.close();
+                                  shared = new String(bo.toByteArray(), "UTF-8");
+                              } catch (Exception e) {
+                                  toast("Text திறக்க முடியலை: " + e.getMessage());
+                              }
+                          }
+                      }
                       if (shared != null) {
                           clearImage();
                           input.setText(shared);
