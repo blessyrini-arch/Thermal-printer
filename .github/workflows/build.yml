@@ -47,6 +47,11 @@ jobs:
                           <category android:name="android.intent.category.DEFAULT" />
                           <data android:mimeType="image/*" />
                       </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="application/pdf" />
+                      </intent-filter>
                   </activity>
               </application>
           </manifest>
@@ -149,6 +154,7 @@ jobs:
               Bitmap sharedBitmap;
               Runnable pendingPerm;
               int thr = 140;
+              boolean sharedPdf = false;
               boolean[] blk;
               static final float[] GAMMA = {0.5f, 0.65f, 0.8f, 1.0f, 1.25f};
 
@@ -192,7 +198,7 @@ jobs:
 
                   preview = new ImageView(this);
                   preview.setAdjustViewBounds(true);
-                  preview.setMaxHeight(dp(300));
+                  preview.setMaxHeight(dp(450));
                   l.addView(preview);
 
                   clearBtn = new Button(this);
@@ -219,10 +225,88 @@ jobs:
 
               void clearImage() {
                   sharedBitmap = null;
+                  sharedPdf = false;
                   preview.setImageBitmap(null);
                   input.setVisibility(View.VISIBLE);
                   clearBtn.setVisibility(View.GONE);
                   rotBtn.setVisibility(View.GONE);
+              }
+
+              void startPdf(final Intent intent) {
+                  final Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                  if (uri == null) return;
+                  toast("PDF தயாராகிறது...");
+                  new Thread(() -> {
+                      try {
+                          final Bitmap bm = renderPdf(uri);
+                          runOnUiThread(() -> {
+                              sharedBitmap = bm;
+                              sharedPdf = true;
+                              preview.setImageBitmap(bm);
+                              input.setVisibility(View.GONE);
+                              clearBtn.setVisibility(View.VISIBLE);
+                              rotBtn.setVisibility(View.VISIBLE);
+                          });
+                      } catch (Throwable e) {
+                          toast("PDF திறக்க முடியலை: " + e.getMessage());
+                      }
+                  }).start();
+              }
+
+              Bitmap trim(Bitmap b) {
+                  int w = b.getWidth(), h = b.getHeight();
+                  int[] row = new int[w];
+                  int top = h, bot = -1, left = w, right = -1;
+                  for (int y = 0; y < h; y++) {
+                      b.getPixels(row, 0, w, 0, y, w, 1);
+                      for (int x = 0; x < w; x++) {
+                          int p = row[x];
+                          if ((Color.red(p) + Color.green(p) + Color.blue(p)) / 3 < 235) {
+                              if (y < top) top = y;
+                              bot = y;
+                              if (x < left) left = x;
+                              if (x > right) right = x;
+                          }
+                      }
+                  }
+                  if (bot < 0) return b;
+                  int m = 10;
+                  left = Math.max(0, left - m);
+                  top = Math.max(0, top - m);
+                  right = Math.min(w - 1, right + m);
+                  bot = Math.min(h - 1, bot + m);
+                  return Bitmap.createBitmap(b, left, top, right - left + 1, bot - top + 1);
+              }
+
+              Bitmap renderPdf(Uri uri) throws Exception {
+                  android.os.ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "r");
+                  android.graphics.pdf.PdfRenderer r = new android.graphics.pdf.PdfRenderer(pfd);
+                  int w = DOTS[sp.getInt("page", 1)];
+                  ArrayList<Bitmap> parts = new ArrayList<Bitmap>();
+                  int total = 0;
+                  int n = Math.min(r.getPageCount(), 10);
+                  for (int i = 0; i < n; i++) {
+                      android.graphics.pdf.PdfRenderer.Page pg = r.openPage(i);
+                      Bitmap full = Bitmap.createBitmap(pg.getWidth() * 2, pg.getHeight() * 2, Bitmap.Config.ARGB_8888);
+                      full.eraseColor(Color.WHITE);
+                      pg.render(full, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_PRINT);
+                      pg.close();
+                      Bitmap c = trim(full);
+                      int ch = Math.max(1, c.getHeight() * w / c.getWidth());
+                      parts.add(Bitmap.createScaledBitmap(c, w, ch, true));
+                      total += ch + 20;
+                  }
+                  r.close();
+                  pfd.close();
+                  Bitmap out = Bitmap.createBitmap(w, Math.max(1, total), Bitmap.Config.ARGB_8888);
+                  Canvas cv = new Canvas(out);
+                  cv.drawColor(Color.WHITE);
+                  int y = 0;
+                  for (Bitmap pb : parts) {
+                      cv.drawBitmap(pb, 0, y, null);
+                      y += pb.getHeight() + 20;
+                  }
+                  return out;
               }
 
               void rotateImage(int deg) {
@@ -456,7 +540,9 @@ jobs:
               void handleShare(Intent intent) {
                   if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
                   String type = intent.getType();
-                  if (type != null && type.startsWith("image/")) {
+                  if ("application/pdf".equals(type)) {
+                      startPdf(intent);
+                  } else if (type != null && type.startsWith("image/")) {
                       Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
                       if (uri != null) {
                           try {
@@ -464,6 +550,7 @@ jobs:
                               Bitmap bmp = BitmapFactory.decodeStream(is);
                               is.close();
                               bmp = fixOrientation(uri, bmp);
+                              sharedPdf = false;
                               sharedBitmap = bmp;
                               preview.setImageBitmap(bmp);
                               input.setVisibility(View.GONE);
@@ -608,7 +695,7 @@ jobs:
                   ByteArrayOutputStream o = new ByteArrayOutputStream();
                   boolean esc = sp.getInt("ptype", 0) == 0;
                   if (esc) o.write(new byte[]{0x1B, 0x40});
-                  boolean photo = bmp != null && sp.getBoolean("photo", true);
+                  boolean photo = bmp != null && !sharedPdf && sp.getBoolean("photo", true);
                   if (bmp == null && sp.getBoolean("imgtext", true)) bmp = textToBitmap(text);
                   if (bmp != null) o.write(bitmapBytes(bmp, photo));
                   else if (esc && sp.getInt("dens", 2) >= 3) {
