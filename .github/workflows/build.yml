@@ -200,6 +200,22 @@ jobs:
                   status = new TextView(this);
                   l.addView(status);
 
+                  Button paste = new Button(this);
+                  paste.setText("📋 Paste");
+                  paste.setOnClickListener(x -> {
+                      android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                      if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip().getItemCount() > 0) {
+                          CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+                          if (t != null) {
+                              clearImage();
+                              input.setText(t.toString());
+                          }
+                      } else {
+                          toast("Clipboard காலி");
+                      }
+                  });
+                  l.addView(paste);
+
                   input = new EditText(this);
                   input.setHint("Print செய்ய வேண்டிய text இங்கே type செய்யுங்க");
                   input.setMinLines(8);
@@ -227,6 +243,12 @@ jobs:
                   print.setText("🖨 PRINT");
                   print.setOnClickListener(x -> doPrint());
                   l.addView(print);
+
+                  TextView ver = new TextView(this);
+                  ver.setText("ABH printer v6 | Share: text, image, PDF | Paste");
+                  ver.setTextSize(12);
+                  ver.setPadding(0, dp(16), 0, 0);
+                  l.addView(ver);
 
                   ScrollView s = new ScrollView(this);
                   s.addView(l);
